@@ -224,8 +224,11 @@ readCurrentSettings () {
 getCurrentLAPSPassword () {
     echoOut "getCurrentLAPSPassword: Attempting to extract password for version $currentVersion"
     
-    # First, try to get password directly (this will create the temporary file)
-    /usr/local/laps/macOSLAPS -getPassword > /tmp/laps_extract.log 2>&1
+    # Create temporary file for password extraction
+    tempFile="/tmp/laps_extract_$$"
+    
+    # Try to get password and capture all output
+    /usr/local/laps/macOSLAPS -getPassword > "$tempFile" 2>&1
     
     # Check if we're using keychain method (4.x+) or file method (3.x)
     if is-at-least "4.0.0" "$currentVersion"; then
@@ -245,18 +248,26 @@ getCurrentLAPSPassword () {
         echoOut "getCurrentLAPSPassword: Using file method for version 3.x"
         # Wait a moment for file to be created
         sleep 2
+        
+        # Check for password file
         if [ -f "/var/root/Library/Application Support/macOSLAPS-password" ]; then
             currentAdminPassword=$(cat "/var/root/Library/Application Support/macOSLAPS-password")
             rm "/var/root/Library/Application Support/macOSLAPS-password" >/dev/null 2>&1
             echo "$currentAdminPassword"
         else
-            echoOut "getCurrentLAPSPassword: No password file found, trying alternative extraction..."
-            # Try to parse the password from macOSLAPS output
-            if grep -q "Password has been verified to work" /tmp/laps_extract.log; then
-                echoOut "getCurrentLAPSPassword: Password verified but extraction failed - this is a known issue with v3.0.4"
-                echoOut "getCurrentLAPSPassword: LAPS is working, but password display is broken"
-                # Return a placeholder to indicate success but no password display
-                echo "PASSWORD_VERIFIED_BUT_DISPLAY_BROKEN"
+            echoOut "getCurrentLAPSPassword: No password file found, trying alternative methods..."
+            
+            # Try to extract password from the output file
+            if [ -f "$tempFile" ]; then
+                # Look for password patterns in the output
+                passwordLine=$(grep -v "Info\|Password has been verified" "$tempFile" | grep -E "^[A-Za-z0-9\-\!@#\$%\^&\*]+" | head -1)
+                if [[ -n "$passwordLine" ]]; then
+                    echoOut "getCurrentLAPSPassword: Found password in output"
+                    echo "$passwordLine"
+                else
+                    echoOut "getCurrentLAPSPassword: Password verified but extraction failed - known issue with v3.0.4"
+                    echo "PASSWORD_VERIFIED_BUT_DISPLAY_BROKEN"
+                fi
             else
                 echo ""
             fi
@@ -264,7 +275,7 @@ getCurrentLAPSPassword () {
     fi
     
     # Cleanup
-    rm -f /tmp/laps_extract.log
+    rm -f "$tempFile"
 }
 
 #################################################################################################################################################################################
@@ -536,12 +547,15 @@ if [ $rotatePassword = true ]; then
         echoOut "Password extracted successfully, testing authentication..."
         if dscl . authonly "$managedAdminAccount" "$testPassword"; then
             echoOut "Password authentication successful!"
+            echoOut "EXTRACTED PASSWORD: $testPassword"
         else
             echoOut "Warning: Password extracted but authentication failed - may still work for elevation"
+            echoOut "EXTRACTED PASSWORD: $testPassword"
         fi
     elif [[ "$testPassword" == "PASSWORD_VERIFIED_BUT_DISPLAY_BROKEN" ]]; then
         echoOut "Password verified but display broken - this is a known issue with macOSLAPS 3.0.4"
         echoOut "LAPS is working correctly for password rotation, just the display feature is broken"
+        echoOut "MANUAL PASSWORD RETRIEVAL: Try 'sudo dscl . -read /Users/$managedAdminAccount AuthenticationAuthority'"
     else
         echoOut "Warning: Could not extract password, but rotation may have succeeded"
     fi
@@ -551,7 +565,7 @@ echoOut "macOSLAPS installed and configured successfully."
 
 ########### Adjust launch daemon interval and restart the daemon ###########
 intervalInSeconds=$((launchDaemonInterval * 60))
-if [[ $(defaults read /Library/LaunchDaemons/edu.psu.macoslaps-check StartInterval 2>/dev/null) -ne "$intervalInSeconds" ]]; then
+if [[ $(defaults read /Library/LaunchDaemons/edu.psu.macoslaps-check StartInterval 2>/dev/null || echo 0) -ne "$intervalInSeconds" ]]; then
     echoOut "Adjusting launch daemon run interval to $launchDaemonInterval minutes ($intervalInSeconds seconds)..."
     defaults write /Library/LaunchDaemons/edu.psu.macoslaps-check StartInterval "$intervalInSeconds"
     echoOut "Interval adjusted, restarting the macoslaps-check daemon..."
